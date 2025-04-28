@@ -16,10 +16,10 @@ interface CrawlOptions {
   fuzzyThreshold?: number;
 }
 
-// Facebook Graph API base URL
-const FB_GRAPH_BASE_URL = "https://graph.facebook.com/v18.0";
-// You'll need to replace this with your actual access token
-const FB_ACCESS_TOKEN = process.env.FB_ACCESS_TOKEN || "your_access_token_here";
+// YouTube API base URL
+const YT_API_BASE_URL = "https://www.googleapis.com/youtube/v3";
+// Replace with your actual YouTube API key
+const YT_API_KEY = process.env.YT_API_KEY || "your_youtube_api_key_here";
 
 // Create Hono app
 const app = new Hono();
@@ -61,13 +61,13 @@ function calculateSimilarity(str1: string, str2: string): number {
   return 1 - distance / maxLen;
 }
 
-// Function to search Facebook for potentially impersonating accounts
-async function searchFacebookAccounts(
+// Function to search YouTube for potentially impersonating channels
+async function searchYouTubeChannels(
   options: CrawlOptions,
 ): Promise<ImpersonatingAccount[]> {
   const {
     keyword,
-    limit = 25,
+    limit = 50, // YouTube API typically allows more results than Facebook
     throttleMs = 1000,
     fuzzyThreshold = 0.7,
   } = options;
@@ -75,8 +75,8 @@ async function searchFacebookAccounts(
   const results: ImpersonatingAccount[] = [];
 
   try {
-    // Search for pages first
-    const searchUrl = `${FB_GRAPH_BASE_URL}/search?q=${encodeURIComponent(keyword)}&type=page&limit=${limit}&fields=name,about,link&access_token=${FB_ACCESS_TOKEN}`;
+    // Search for channels matching the keyword
+    const searchUrl = `${YT_API_BASE_URL}/search?part=snippet&type=channel&q=${encodeURIComponent(keyword)}&maxResults=${limit}&key=${YT_API_KEY}`;
 
     const response = await fetch(searchUrl);
     if (!response.ok) {
@@ -90,61 +90,93 @@ async function searchFacebookAccounts(
     const data = await response.json();
 
     // Process each result
-    for (const item of data.data || []) {
+    for (const item of data.items || []) {
       // Apply throttling
       await setTimeout(throttleMs);
 
-      const { name, about, link } = item;
+      const { title, description, channelId } = item.snippet;
+      const channelUrl = `https://www.youtube.com/channel/${channelId}`;
 
       // Check if the name matches our keyword with fuzzy matching
-      const similarity = calculateSimilarity(name, keyword);
+      const similarity = calculateSimilarity(title, keyword);
 
       if (similarity >= fuzzyThreshold) {
         results.push({
-          name,
-          description: about,
-          url: link,
+          name: title,
+          description: description,
+          url: channelUrl,
         });
-      }
-    }
-
-    // For user accounts (profiles), we need to use a different approach
-    // This is a simplified version and may need additional methods
-    // like web scraping if the API doesn't provide enough data
-
-    const userSearchUrl = `${FB_GRAPH_BASE_URL}/search?q=${encodeURIComponent(keyword)}&type=user&limit=${limit}&fields=name,link&access_token=${FB_ACCESS_TOKEN}`;
-
-    const userResponse = await fetch(userSearchUrl);
-    if (!userResponse.ok) {
-      console.error(`User API request failed: ${userResponse.status}`);
-    } else {
-      const userData = await userResponse.json();
-
-      for (const user of userData.data || []) {
-        // Apply throttling
-        await setTimeout(throttleMs);
-
-        const { name, link } = user;
-        const similarity = calculateSimilarity(name, keyword);
-
-        if (similarity >= fuzzyThreshold) {
+      } else {
+        // Check if the description contains the keyword
+        if (
+          description &&
+          description.toLowerCase().includes(keyword.toLowerCase())
+        ) {
           results.push({
-            name,
-            url: link,
+            name: title,
+            description: description,
+            url: channelUrl,
           });
         }
       }
+
+      // For channels we find, also get their detailed info
+      const channelUrl = `${YT_API_BASE_URL}/channels?part=snippet,brandingSettings&id=${channelId}&key=${YT_API_KEY}`;
+
+      try {
+        const channelResponse = await fetch(channelUrl);
+        if (channelResponse.ok) {
+          const channelData = await channelResponse.json();
+
+          if (channelData.items && channelData.items.length > 0) {
+            const channelDetails = channelData.items[0];
+
+            // Check if channel description or about text contains relevant keywords
+            const channelDescription =
+              channelDetails.snippet?.description || "";
+            const channelAbout =
+              channelDetails.brandingSettings?.channel?.description || "";
+
+            // Re-evaluate based on more detailed info
+            if (
+              channelDescription
+                .toLowerCase()
+                .includes(keyword.toLowerCase()) ||
+              channelAbout.toLowerCase().includes(keyword.toLowerCase())
+            ) {
+              // Only add if not already in results
+              if (
+                !results.some(
+                  (r) =>
+                    r.url === `https://www.youtube.com/channel/${channelId}`,
+                )
+              ) {
+                results.push({
+                  name: title,
+                  description: channelDescription || channelAbout,
+                  url: `https://www.youtube.com/channel/${channelId}`,
+                });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`Error fetching channel details for ${channelId}:`, err);
+      }
+
+      // Apply throttling again
+      await setTimeout(throttleMs);
     }
 
     return results;
   } catch (error) {
-    console.error("Error searching Facebook accounts:", error);
+    console.error("Error searching YouTube channels:", error);
     return [];
   }
 }
 
 // Alternative approach using web scraping (as a fallback)
-async function scrapeFacebookResults(
+async function scrapeYouTubeResults(
   keyword: string,
   throttleMs = 2000,
 ): Promise<ImpersonatingAccount[]> {
@@ -152,7 +184,7 @@ async function scrapeFacebookResults(
 
   try {
     // This is a simplified example and would need to be extended with proper parsing
-    const searchUrl = `https://www.facebook.com/search/pages?q=${encodeURIComponent(keyword)}`;
+    const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(keyword)}&sp=EgIQAg%253D%253D`; // Filter for channels
 
     const response = await fetch(searchUrl, {
       headers: {
@@ -167,31 +199,59 @@ async function scrapeFacebookResults(
 
     const html = await response.text();
 
-    // A basic regex pattern to find page information
+    // A very basic regex pattern to find channel information
     // In a real implementation, you'd want to use a proper HTML parser
-    const pageRegex =
-      /<a[^>]*href="(https:\/\/www\.facebook\.com\/[^"]+)"[^>]*><span[^>]*>([^<]+)<\/span>/g;
+    const channelRegex = /href="\/(@[^"]+)"[^>]*>[^<]*<\/a>/g;
 
     let match;
-    while ((match = pageRegex.exec(html)) !== null) {
+    while ((match = channelRegex.exec(html)) !== null) {
       await setTimeout(throttleMs);
 
-      const url = match[1];
-      const name = match[2];
+      const handle = match[1];
+      // Fetch the channel page to get more details
+      const channelUrl = `https://www.youtube.com/${handle}`;
 
-      const similarity = calculateSimilarity(name, keyword);
+      try {
+        const channelResponse = await fetch(channelUrl);
+        if (channelResponse.ok) {
+          const channelHtml = await channelResponse.text();
 
-      if (similarity >= 0.7) {
-        results.push({
-          name,
-          url,
-        });
+          // Extract the channel name (very simplified)
+          const nameMatch = channelHtml.match(
+            /<meta property="og:title" content="([^"]+)"/,
+          );
+          const name = nameMatch ? nameMatch[1] : handle;
+
+          // Extract description (very simplified)
+          const descMatch = channelHtml.match(
+            /<meta property="og:description" content="([^"]+)"/,
+          );
+          const description = descMatch ? descMatch[1] : "";
+
+          const similarity = calculateSimilarity(name, keyword);
+
+          if (
+            similarity >= 0.7 ||
+            description.toLowerCase().includes(keyword.toLowerCase())
+          ) {
+            results.push({
+              name,
+              description,
+              url: channelUrl,
+            });
+          }
+        }
+      } catch (err) {
+        console.error(`Error fetching channel page for ${handle}:`, err);
       }
+
+      // Apply throttling again
+      await setTimeout(throttleMs);
     }
 
     return results;
   } catch (error) {
-    console.error("Error scraping Facebook results:", error);
+    console.error("Error scraping YouTube results:", error);
     return [];
   }
 }
@@ -208,18 +268,18 @@ app.post("/api/search", async (c) => {
 
     const options: CrawlOptions = {
       keyword,
-      limit: limit || 25,
+      limit: limit || 50,
       throttleMs: throttleMs || 1000,
       fuzzyThreshold: fuzzyThreshold || 0.7,
     };
 
-    // Use the Graph API method first
-    let results = await searchFacebookAccounts(options);
+    // Use the YouTube API method first
+    let results = await searchYouTubeChannels(options);
 
     // If no results or API failed, try scraping (fallback)
     if (results.length === 0) {
       console.log("No results from API, trying scraping fallback");
-      results = await scrapeFacebookResults(keyword, options.throttleMs);
+      results = await scrapeYouTubeResults(keyword, options.throttleMs);
     }
 
     return c.json({
@@ -230,6 +290,78 @@ app.post("/api/search", async (c) => {
   } catch (error) {
     console.error("Error processing search request:", error);
     return c.json({ error: "Failed to process search request" }, 500);
+  }
+});
+
+// Extended search endpoint that combines channel and video searches
+app.post("/api/extended-search", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { keyword, limit, throttleMs, fuzzyThreshold } = body;
+
+    if (!keyword) {
+      return c.json({ error: "Keyword is required" }, 400);
+    }
+
+    const options: CrawlOptions = {
+      keyword,
+      limit: limit || 30,
+      throttleMs: throttleMs || 1000,
+      fuzzyThreshold: fuzzyThreshold || 0.7,
+    };
+
+    // Search for channels
+    const channelResults = await searchYouTubeChannels(options);
+
+    // Also search for videos that might be from impersonating channels
+    const videoSearchUrl = `${YT_API_BASE_URL}/search?part=snippet&type=video&q=${encodeURIComponent(keyword)}&maxResults=${options.limit}&key=${YT_API_KEY}`;
+
+    const videoResponse = await fetch(videoSearchUrl);
+    let videoChannels: ImpersonatingAccount[] = [];
+
+    if (videoResponse.ok) {
+      const videoData = await videoResponse.json();
+      const channelIds = new Set<string>();
+
+      // Collect unique channel IDs from video results
+      for (const item of videoData.items || []) {
+        const { channelId, channelTitle } = item.snippet;
+
+        if (!channelIds.has(channelId)) {
+          channelIds.add(channelId);
+
+          const similarity = calculateSimilarity(channelTitle, keyword);
+
+          if (similarity >= options.fuzzyThreshold) {
+            videoChannels.push({
+              name: channelTitle,
+              url: `https://www.youtube.com/channel/${channelId}`,
+            });
+          }
+        }
+
+        // Apply throttling
+        await setTimeout(options.throttleMs);
+      }
+    }
+
+    // Combine results, removing duplicates
+    const allResults = [...channelResults];
+
+    for (const channel of videoChannels) {
+      if (!allResults.some((r) => r.url === channel.url)) {
+        allResults.push(channel);
+      }
+    }
+
+    return c.json({
+      keyword,
+      count: allResults.length,
+      results: allResults,
+    });
+  } catch (error) {
+    console.error("Error processing extended search request:", error);
+    return c.json({ error: "Failed to process extended search request" }, 500);
   }
 });
 
