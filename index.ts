@@ -19,7 +19,7 @@ interface CrawlOptions {
 // YouTube API base URL
 const YT_API_BASE_URL = "https://www.googleapis.com/youtube/v3";
 // Replace with your actual YouTube API key
-const YT_API_KEY = process.env.YT_API_KEY || "your_youtube_api_key_here";
+const YT_API_KEY = process.env.YT_API_KEY;
 
 // Create Hono app
 const app = new Hono();
@@ -95,7 +95,7 @@ async function searchYouTubeChannels(
       await setTimeout(throttleMs);
 
       const { title, description, channelId } = item.snippet;
-      const channelUrl = `https://www.youtube.com/channel/${channelId}`;
+      const url = `https://www.youtube.com/channel/${channelId}`;
 
       // Check if the name matches our keyword with fuzzy matching
       const similarity = calculateSimilarity(title, keyword);
@@ -104,7 +104,7 @@ async function searchYouTubeChannels(
         results.push({
           name: title,
           description: description,
-          url: channelUrl,
+          url: url,
         });
       } else {
         // Check if the description contains the keyword
@@ -115,7 +115,7 @@ async function searchYouTubeChannels(
           results.push({
             name: title,
             description: description,
-            url: channelUrl,
+            url: url,
           });
         }
       }
@@ -332,7 +332,7 @@ app.post("/api/extended-search", async (c) => {
 
           const similarity = calculateSimilarity(channelTitle, keyword);
 
-          if (similarity >= options.fuzzyThreshold) {
+          if (similarity >= (options?.fuzzyThreshold ?? 0.7)) {
             videoChannels.push({
               name: channelTitle,
               url: `https://www.youtube.com/channel/${channelId}`,
